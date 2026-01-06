@@ -7,6 +7,8 @@ import insightface
 from insightface.app import FaceAnalysis
 from datetime import datetime, timezone
 from PIL import Image, ImageChops, ImageStat
+import io
+import requests
 import warnings
 warnings.filterwarnings("ignore", category=FutureWarning)
 import uuid # Para generar IDs únicos en la BBDD
@@ -50,7 +52,7 @@ DEVICE_ID = os.getenv("DEVICE_ID", "Device_Default")
 # UMBRALES
 SIMILARITY_THRESHOLD = 0.5    
 VISUAL_DIFF_PERCENTAGE = 20.0 
-AUDIO_LOUD_THRESHOLD = 1000   
+AUDIO_LOUD_THRESHOLD = 2000   
 AUDIO_WINDOW_SEC = 30         
 AUDIO_MAX_COUNT = 2           
 
@@ -101,30 +103,86 @@ def get_visual_difference_percentage(ref_path, current_path):
         print(f"⚠️ Error comparando imágenes: {e}")
         return 0.0
 
-def upload_to_cloud_ecosystem(verdict, reasons, img_path, event_type="EVENT"):
+def get_visual_difference_percentage_from_source(ref_source, event_bytes):
+    """ref_source puede ser una URL o una ruta local; event_bytes son los bytes de la imagen del evento."""
+    try:
+        # Cargar imagen de referencia
+        if not ref_source:
+            return 0.0
+
+        if isinstance(ref_source, str) and ref_source.startswith("http"):
+            resp = requests.get(ref_source, timeout=10)
+            resp.raise_for_status()
+            ref_img = Image.open(io.BytesIO(resp.content)).convert('RGB')
+        else:
+            ref_img = Image.open(ref_source).convert('RGB')
+
+        # Cargar imagen de evento desde bytes
+        event_img = Image.open(io.BytesIO(event_bytes)).convert('RGB')
+
+        if ref_img.size != event_img.size:
+            event_img = event_img.resize(ref_img.size)
+
+        diff = ImageChops.difference(ref_img, event_img)
+        stat = ImageStat.Stat(diff)
+        diff_percent = (sum(stat.mean) / (len(stat.mean) * 255)) * 100
+        return diff_percent
+    except Exception as e:
+        print(f"⚠️ Error comparando imágenes desde fuente: {e}")
+        return 0.0
+
+def get_latest_reference_image_url():
+    """Consulta Cosmos DB por la última referencia (type='REFERENCE') y devuelve su image_url si existe."""
+    if not container:
+        return None
+    try:
+        query = f"SELECT TOP 1 c.image_url FROM c WHERE c.edge_id = '{EDGE_ID}' AND c.device_id = '{DEVICE_ID}' AND c.type = 'REFERENCE' ORDER BY c.timestamp DESC"
+        items = list(container.query_items(query=query, enable_cross_partition_query=True))
+        if len(items) > 0:
+            return items[0].get('image_url')
+    except Exception as e:
+        print(f"⚠️ Error consultando referencia en Cosmos DB: {e}")
+    return None
+
+def upload_to_cloud_ecosystem(verdict, reasons, img_path=None, img_bytes=None, event_type="EVENT", name_hint=None):
     """
-    Sube la imagen a Cloudinary y los metadatos a Cosmos DB.
+    Sube la imagen (desde ruta o bytes) a Cloudinary y los metadatos a Cosmos DB.
     """
     image_url = "NO_IMAGE"
-    
+
     # 1. SUBIR IMAGEN A CLOUDINARY
-    if img_path and os.path.exists(img_path):
+    if img_bytes is not None:
+        print("☁️ Subiendo imagen (bytes) a Cloudinary...", end=" ")
+        try:
+            stream = io.BytesIO(img_bytes)
+            name_without_ext = name_hint if name_hint else datetime.now().strftime('%Y%m%d_%H%M%S')
+            response = cloudinary.uploader.upload(
+                stream,
+                public_id=f"{EDGE_ID}/{name_without_ext}",
+                folder="security_events",
+                type="authenticated"
+            )
+            image_url = response.get("secure_url", image_url)
+            print("✅ OK")
+        except Exception as e:
+            print(f"❌ Fallo subida imagen (bytes): {e}")
+    elif img_path and os.path.exists(img_path):
         print("☁️ Subiendo imagen a Cloudinary...", end=" ")
         try:
-            # Usamos el nombre del archivo (sin extensión) como public_id para organizarnos
             filename = os.path.basename(img_path)
             name_without_ext = os.path.splitext(filename)[0]
-            
             response = cloudinary.uploader.upload(
-                img_path, 
+                img_path,
                 public_id=f"{EDGE_ID}/{name_without_ext}", # Carpeta organizada por Edge
                 folder="security_events",
                 type="authenticated"
             )
-            image_url = response["secure_url"]
+            image_url = response.get("secure_url", image_url)
             print("✅ OK")
         except Exception as e:
             print(f"❌ Fallo subida imagen: {e}")
+    else:
+        print("☁️ No hay imagen para subir (se ignorará).")
 
     # 2. SUBIR METADATOS A COSMOS DB
     if container:
@@ -140,7 +198,6 @@ def upload_to_cloud_ecosystem(verdict, reasons, img_path, event_type="EVENT"):
                 "reasons": reasons,          # Array de causas
                 "image_url": image_url       # Enlace a Cloudinary
             }
-            
             container.create_item(body=document)
             print("✅ OK")
         except Exception as e:
@@ -194,25 +251,25 @@ def main():
                     if b'--- FOTO END ---' in raw_line:
                         print(" OK.")
                         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                        
-                        # Guardar imagen localmente
-                        if raw_type == "INITIAL_REFERENCE":
-                            current_path = ref_img_path
-                            print("✅ Referencia local actualizada.")
-                            # Subimos también la referencia a la nube para tener histórico
-                            upload_to_cloud_ecosystem("INFO", ["Nueva Referencia Inicial"], current_path, event_type="REFERENCE")
-                        else:
-                            current_path = os.path.join(OUTPUT_DIR, f"evidencia_{timestamp}.jpg")
-                            
-                        with open(current_path, "wb") as f:
-                            f.write(photo_bytes)
 
-                        # --- LÓGICA DE DECISIÓN ESTRICTA ---
-                        if raw_type != "INITIAL_REFERENCE":
-                            
+                        event_bytes = bytes(photo_bytes)
+
+                        # Si es referencia inicial, guardarla localmente y subirla a la nube
+                        if raw_type == "INITIAL_REFERENCE":
+                            print("✅ Recibida Referencia Inicial: guardando localmente...")
+                            try:
+                                with open(ref_img_path, "wb") as rf:
+                                    rf.write(event_bytes)
+                                print("✅ Referencia guardada localmente.")
+                                # Subir referencia a la nube
+                                upload_to_cloud_ecosystem("INFO", ["Nueva Referencia Inicial"], img_path=ref_img_path, event_type="REFERENCE", name_hint=f"referencia_{timestamp}")
+                                print("✅ Referencia subida a la nube.")
+                            except Exception as e:
+                                print(f"❌ Fallo subiendo/guardando referencia: {e}")
+                        else:
+                            # --- LÓGICA DE DECISIÓN ESTRICTA ---
                             is_positive = False
                             reasons = []
-                            
                             parts = raw_type.split(":")
                             category = parts[1] if len(parts) > 1 else "UNKNOWN"
                             val_str = parts[2] if len(parts) > 2 else "0"
@@ -227,7 +284,6 @@ def main():
                                 if sensor_val > AUDIO_LOUD_THRESHOLD:
                                     is_positive = True
                                     reasons.append(f"Audio Intenso ({sensor_val})")
-                                
                                 now = time.time()
                                 audio_timestamps.append(now)
                                 audio_timestamps = [t for t in audio_timestamps if now - t <= AUDIO_WINDOW_SEC]
@@ -237,53 +293,61 @@ def main():
 
                             # 2. ANÁLISIS VISUAL
                             print("🔍 Analizando imagen...")
-                            img = cv2.imread(current_path)
+                            img = None
+                            try:
+                                nparr = np.frombuffer(event_bytes, np.uint8)
+                                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+                            except Exception:
+                                img = None
+
                             faces = []
                             if img is not None:
                                 faces = app.get(img)
-                            
+
                             face_detected = len(faces) > 0
-                            
+
                             if face_detected:
                                 intruder_emb = faces[0].embedding
                                 match_found = False
                                 matched_name = "Desconocido"
-                                
                                 for idx, known_emb in enumerate(known_embeddings):
                                     sim = compute_sim(intruder_emb, known_emb)
                                     if sim > SIMILARITY_THRESHOLD:
                                         match_found = True
                                         matched_name = known_names[idx]
                                         break
-                                
                                 if not match_found:
                                     is_positive = True
                                     reasons.append("Cara NO Registrada")
                                 else:
                                     print(f"   -> Cara conocida: {matched_name}")
-                                    # Opcional: Si quieres registrar que entró alguien conocido,
-                                    # puedes no marcarlo como positivo pero subirlo igual.
-                            
+                                    # Si la cara está registrada, siempre notificar pero NO clasificar como POSITIVE
+                                    is_positive = False
+                                    reasons.append(f"Persona conocida ({matched_name})")
                             else:
                                 print("   -> No se detectaron caras en la imagen.")
-                                diff_pct = get_visual_difference_percentage(ref_img_path, current_path)
+                                # Usar la referencia local más reciente (guardada en ref_img_path)
+                                diff_pct = 0.0
+                                if os.path.exists(ref_img_path):
+                                    diff_pct = get_visual_difference_percentage_from_source(ref_img_path, event_bytes)
+                                else:
+                                    print("⚠️ No hay referencia local disponible para comparar.")
+
                                 print(f"   -> Cambio Visual: {diff_pct:.2f}%")
-                                
                                 if diff_pct > VISUAL_DIFF_PERCENTAGE:
                                     is_positive = True
-                                    reasons.append(f"Cambio Visual > 20% ({diff_pct:.1f}%)")
+                                    reasons.append(f"Cambio Visual > {VISUAL_DIFF_PERCENTAGE}% ({diff_pct:.1f}%)")
 
                             # 3. VEREDICTO FINAL Y SUBIDA
                             verdict = "POSITIVE" if is_positive else "NEGATIVE"
-                            
                             print("="*40)
                             print(f"📊 VEREDICTO: {verdict}")
                             if is_positive:
                                 print(f"🚨 MOTIVOS: {', '.join(reasons)}")
                             print("="*40)
-                            
-                            # SUBIR A CLOUDINARY Y COSMOS DB
-                            upload_to_cloud_ecosystem(verdict, reasons, current_path)
+
+                            # SUBIR A CLOUDINARY Y COSMOS DB desde bytes
+                            upload_to_cloud_ecosystem(verdict, reasons, img_bytes=event_bytes, name_hint=f"evidencia_{timestamp}")
 
                         current_state = "IDLE"
                     else:
