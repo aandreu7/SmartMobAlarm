@@ -1,0 +1,62 @@
+[
+  {
+    "id": "1",
+    "edge_id": "Edge_Office",
+    "device_id": "Device_Cam1",
+    "type": "REFERENCE",
+    "timestamp": "2026-01-06T08:00:00Z",
+    "verdict": "INFO",
+    "reasons": ["Initial reference setup"],
+    "image_url": "https://images.unsplash.com/photo-1497366216548-37526070297c?auto=format&fit=crop&w=800&q=80"
+  },
+  {
+    "id": "2",
+    "edge_id": "Edge_Office",
+    "device_id": "Device_Cam1",
+    "type": "EVENT:IMU:1",
+    "timestamp": "2026-01-06T10:15:00Z",
+    "verdict": "POSITIVE",
+    "reasons": ["IMU Movement Detected", "Face NOT Recognized"],
+    "image_url": "https://images.unsplash.com/photo-1509822929063-6b6cfc9b42f2?auto=format&fit=crop&w=800&q=80"
+  },
+  {
+    "id": "3",
+    "edge_id": "Edge_Office",
+    "device_id": "Device_Mic1",
+    "type": "EVENT:AUDIO:2500",
+    "timestamp": "2026-01-06T10:20:00Z",
+    "verdict": "NEGATIVE",
+    "reasons": ["Known Person (Alice)"],
+    "image_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=800&q=80"
+  },
+  {
+    "id": "4",
+    "edge_id": "Edge_Garage",
+    "device_id": "Device_Gate",
+    "type": "REFERENCE",
+    "timestamp": "2026-01-06T09:00:00Z",
+    "verdict": "INFO",
+    "reasons": ["Garage Door Closed"],
+    "image_url": "https://images.unsplash.com/photo-1530124566582-a618bc2615dc?auto=format&fit=crop&w=800&q=80"
+  },
+  {
+    "id": "5",
+    "edge_id": "Edge_Garage",
+    "device_id": "Device_Gate",
+    "type": "EVENT:DOOR",
+    "timestamp": "2026-01-06T11:45:00Z",
+    "verdict": "POSITIVE",
+    "reasons": ["Door Forced Open"],
+    "image_url": "https://images.unsplash.com/photo-1623945202623-23e655883709?auto=format&fit=crop&w=800&q=80"
+  },
+  {
+    "id": "6",
+    "edge_id": "Edge_Office",
+    "device_id": "Device_Cam1",
+    "type": "EVENT:VISUAL",
+    "timestamp": "2026-01-06T12:00:00Z",
+    "verdict": "POSITIVE",
+    "reasons": ["Unidentified Object"],
+    "image_url": "https://images.unsplash.com/photo-1555685812-4b943f3e994a?auto=format&fit=crop&w=800&q=80"
+  }
+]
