@@ -1,6 +1,7 @@
 // Main app: dashboard logic
 import React, { useEffect, useState, useMemo } from 'react';
 import EventCard from './components/EventCard';
+import LiveTelemetryModal from './components/LiveTelemetryModal';
 import { fetchAllEvents } from './services/cosmos';
 import './styles.css';
 
@@ -8,6 +9,7 @@ export default function App() {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [showLive, setShowLive] = useState(false);
   
   // Selection state
   const [selectedEdge, setSelectedEdge] = useState('');
@@ -153,6 +155,28 @@ export default function App() {
         )}
 
         <div className="nav-section stats-summary">
+          <button 
+            onClick={() => setShowLive(true)}
+            style={{
+              width: '100%',
+              padding: '12px',
+              backgroundColor: 'rgba(239, 68, 68, 0.15)',
+              border: '1px solid var(--accent-positive)',
+              color: 'var(--accent-positive)',
+              borderRadius: '8px',
+              cursor: 'pointer',
+              fontWeight: 'bold',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: '8px',
+              marginBottom: '20px'
+            }}
+          >
+            <span className="pulse" style={{background: 'var(--accent-positive)', boxShadow: 'none', width: '8px', height: '8px'}}></span>
+            Live Device Monitor
+          </button>
+
           <label className="nav-label">Real-time Metrics</label>
           <div className="stat-item">
             <span>Positive Alerts</span>
@@ -238,6 +262,8 @@ export default function App() {
           </div>
         </section>
       </main>
+
+      {showLive && <LiveTelemetryModal onClose={() => setShowLive(false)} />}
     </div>
   );
 }
