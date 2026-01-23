@@ -66,14 +66,15 @@ KNOWN_FACES_DIR = "personas_conocidas"
 EDGE_ID = os.getenv("EDGE_ID", "Edge_Default")
 DEVICE_ID = os.getenv("DEVICE_ID", "Device_Default")
 
-# --- CONFIGURACIÓN BLE (WATCHDOG) ---
+# CONFIGURACIÓN BLE (WATCHDOG)
 # Nombre del dispositivo BLE asociado al Watchdog
 WATCHDOG_BLE_NAME = "WATCHDOG" 
-# UUID de la característica que envía los datos
-CHARACTERISTIC_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+# UUIDs de las características
+TELEMETRY_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+HEARTBEAT_UUID = "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
 # UMBRALES
-SIMILARITY_THRESHOLD = 0.5 # Positivo si el detector facial detecta una cara desconocida con confianza inferior al threshold   
+SIMILARITY_THRESHOLD = 0.5 # Positivo si el detector facial detecta una cara desconocida con confianza inferior al threshold
 VISUAL_DIFF_PERCENTAGE = 20.0 # Positivo si entre la imagen de referencia y la de evento la diferencia porcentual es superior al threshold
 AUDIO_LOUD_THRESHOLD = 2000 # Positivo si el nivel de sonido detectado es superior al threshold
 AUDIO_WINDOW_SEC = 30 # Positivo si se detectan tantas alarmas de audio en menor tiempo que el threshold
@@ -189,8 +190,16 @@ def upload_to_cloud_ecosystem(verdict, reasons, img_path=None, img_bytes=None, e
             }
             container.create_item(body=document)
             print("✅ Cosmos DB OK")
+
+            # Notificación Tiempo Real al UI (Socket.IO)
+            if sio.connected:
+                print("⚡ Enviando evento a UI...", end=" ")
+                # Emitimos exactamente el mismo documento que guardamos
+                asyncio.create_task(sio.emit('new_incident', document))
+                print("OK")
+
         except Exception as e:
-            print(f"❌ Fallo Cosmos DB: {e}")
+            print(f"❌ Fallo Cosmos DB / Socket: {e}")
 
 # --- CALLBACK DE NOTIFICACIÓN BLE ---
 # Esta función se ejecuta automáticamente cada vez que el Watchdog envía datos nuevos
@@ -204,7 +213,7 @@ async def notification_handler(sender, data):
         print(f"📡 BLE TELEMETRY: {latest_ble_data}") 
         
         # [SOCKET.IO] Enviar evento al servidor Node.js (UI)
-        # Esto permite que la web se actualice en TIEMPO REAL sin esperar
+        # Esto permite que la web se actualice en TIEMPO REAL sin esperar (WebSocket)
         if sio.connected:
             await sio.emit('telemetry_data', decoded_str)
         else:
@@ -212,6 +221,23 @@ async def notification_handler(sender, data):
 
     except Exception as e:
         print(f"Error decodificando BLE: {e}")
+
+# --- CALLBACK HEARTBEAT BLE ---
+async def heartbeat_handler(sender, data):
+    try:
+        msg = data.decode('utf-8')
+        print(f"❤️ HEARTBEAT: {msg}") # Opcional: Descomentar para debug
+        
+        if sio.connected:
+            # Enviamos identificación del dispositivo y estado
+            payload = {
+                "device_id": DEVICE_ID,
+                "status": msg, # Debería ser "OK"
+                "timestamp": datetime.now().isoformat()
+            }
+            await sio.emit('heartbeat', payload)
+    except Exception as e:
+        print(f"❌ Error Heartbeat: {e}")
 
 # --- BUCLE DE CONEXIÓN SOCKET.IO (RECONEXIÓN AUTOMÁTICA) ---
 async def socket_connection_loop():
@@ -257,8 +283,9 @@ async def ble_telemetry_loop():
                 async with BleakClient(device) as client:
                     print("✅ Conectado a Watchdog BLE via Edge!")
                     
-                    # Suscribirse a notificaciones
-                    await client.start_notify(CHARACTERISTIC_UUID, notification_handler)
+                    # Suscribirse a notificaciones (Telemetría + Heartbeat)
+                    await client.start_notify(TELEMETRY_UUID, notification_handler)
+                    await client.start_notify(HEARTBEAT_UUID, heartbeat_handler)
                     
                     # Mantener conexión viva
                     while client.is_connected:

@@ -18,13 +18,25 @@ const io = new Server(server, {
     }
 });
 
-// [NUEVO] Gestión de WebSockets
+// Gestión de WebSockets
 io.on('connection', (socket) => {
     console.log('🟢 Cliente conectado:', socket.id);
 
-    // Recibir datos del Edge (Python) y rebotarlos al Frontend (React)
+    // Recibir datos de telemetría del Edge (Python) y rebotarlos al Frontend (React)
     socket.on('telemetry_data', (data) => {
         io.emit('telemetry_update', data); // Broadcast a todos
+    });
+
+    // [NUEVO] Heartbeat del Watchdog
+    socket.on('heartbeat', (data) => {
+        // data = { device_id, status, timestamp }
+        io.emit('device_heartbeat', data); 
+    });
+
+    // [NUEVO] Alerta de Incidente (Nuevo evento detectado)
+    socket.on('new_incident', (incidentData) => {
+        console.log("⚡ Nuevo incidente recibido del Edge. Retransmitiendo...");
+        io.emit('incident_alert', incidentData);
     });
 
     socket.on('disconnect', (reason) => {

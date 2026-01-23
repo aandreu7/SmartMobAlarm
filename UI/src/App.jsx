@@ -1,5 +1,6 @@
 // Main app: dashboard logic
 import React, { useEffect, useState, useMemo } from 'react';
+import { io } from 'socket.io-client';
 import EventCard from './components/EventCard';
 import LiveTelemetryModal from './components/LiveTelemetryModal';
 import { fetchAllEvents } from './services/cosmos';
@@ -11,10 +12,46 @@ export default function App() {
   const [error, setError] = useState(null);
   const [showLive, setShowLive] = useState(false);
   
+  // Real-time Active Devices
+  const [activeDevices, setActiveDevices] = useState({});
+
   // Selection state
   const [selectedEdge, setSelectedEdge] = useState('');
   const [selectedDevice, setSelectedDevice] = useState('ALL');
   const [filterVerdict, setFilterVerdict] = useState('ALL');
+
+  // Socket.IO for Heartbeats
+  useEffect(() => {
+    const socket = io('http://localhost:3001');
+
+    socket.on('device_heartbeat', (data) => {
+      // data = { device_id, status, timestamp }
+      setActiveDevices(prev => ({
+        ...prev,
+        [data.device_id]: {
+          lastSeen: new Date(),
+          status: data.status
+        }
+      }));
+    });
+
+    // [NUEVO] Escuchar nuevos incidentes en tiempo real
+    socket.on('incident_alert', (newEvent) => {
+        console.log("🚨 ALERTA EN TIEMPO REAL:", newEvent);
+        // Añadimos el nuevo evento al principio de la lista
+        setEvents(prevEvents => [newEvent, ...prevEvents]);
+    });
+
+    return () => socket.disconnect();
+  }, []);
+
+  // Refresh UI every second to update the "seconds ago" counter
+  useEffect(() => {
+    const interval = setInterval(() => {
+        setActiveDevices(prev => ({...prev}));
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     async function loadData() {
@@ -123,6 +160,42 @@ export default function App() {
           <span className="subtitle">Control Panel</span>
         </div>
         
+        <div className="nav-section">
+          <label className="nav-label">Active Devices (Live)</label>
+          <div className="active-devices-list">
+             {Object.keys(activeDevices).length === 0 ? (
+                 <div className="device-row offline">
+                    <span className="status-dot"></span>
+                    <span className="device-name">Waiting...</span>
+                 </div>
+             ) : (
+                 Object.keys(activeDevices).map(devId => {
+                     const dev = activeDevices[devId];
+                     const diffMs = (new Date() - dev.lastSeen);
+                     const secondsAgo = Math.floor(diffMs / 1000);
+                     
+                     // Online if heartbeat in last 45 seconds
+                     const isOnline = diffMs < 45000;
+                     
+                     return (
+                         <div key={devId} className={`device-row ${isOnline ? 'online' : 'offline'}`}>
+                            <span className={`status-dot ${isOnline ? 'pulse-mini' : ''}`}></span>
+                            <div className="device-info">
+                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', gap:'10px'}}>
+                                    <span className="device-name">{devId}</span>
+                                    {isOnline && <span style={{fontSize:'0.65rem', color:'var(--accent-negative)'}}>{secondsAgo}s ago</span>}
+                                </div>
+                                <span className="device-time">
+                                    {isOnline ? 'System Active' : `Last seen: ${dev.lastSeen.toLocaleTimeString()}`}
+                                </span>
+                            </div>
+                         </div>
+                     );
+                 })
+             )}
+          </div>
+        </div>
+
         <div className="nav-section">
           <label className="nav-label">Edge Nodes</label>
           <select 

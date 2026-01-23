@@ -16,11 +16,14 @@
 #define BAUD_RATE 115200 
 
 // CONFIGURACIÓN BLE
-#define SERVICE_UUID        "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
-#define CHARACTERISTIC_UUID "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define SERVICE_UUID           "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
+#define TELEMETRY_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
+#define HEARTBEAT_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
+// Un servicio --> dos características: Telemetría + Heartbeat (indica que el dispositivo está vivo periódicamente)
 BLEServer* pServer = NULL;
-BLECharacteristic* pCharacteristic = NULL;
+BLECharacteristic* pTelemetryCharacteristic = NULL; // Telemetría completa
+BLECharacteristic* pHeartbeatCharacteristic = NULL; // Heartbeat periódico
 bool deviceConnected = false;
 
 class MyServerCallbacks: public BLEServerCallbacks {
@@ -42,7 +45,15 @@ int micZero = 0;
 int micThresholdVal = 0; 
 bool systemArmed = false;
 
-// [NUEVO] Variable global para compartir el audio con el BLE
+// Timer Heartbeat
+unsigned long lastHeartbeatTime = 0;
+const unsigned long HEARTBEAT_INTERVAL = 30000; // 30 segundos
+
+// Timer Cooldown Alarma (No bloqueante)
+unsigned long lastAlarmTime = 0;
+const unsigned long ALARM_COOLDOWN = 5000; // 5 segundos de espera tras alarma
+
+// Variable global para compartir el audio con el BLE
 volatile int liveAudioLevel = 0; 
 
 // -----------------------------------------------------------------------------
@@ -149,40 +160,38 @@ void check_imu_events() {
     
     float total_accel_val = sqrt(pow(accel_x/981.0f, 2) + pow(accel_y/981.0f, 2) + pow(accel_z/981.0f, 2));
 
-    // --- [ACTUALIZADO] TELEMETRÍA BLE COMPLETA ---
+    // --- TELEMETRÍA BLE COMPLETA ---
     if (deviceConnected) {
-        char statusStr[100]; // Aumentamos tamaño para que quepa todo
-        
-        // Formato Rico:
-        // Au: Audio Raw
-        // G:  Fuerza G total
-        // H:  Heading (Brújula)
-        // P:  Pitch (Inclinación adelante/atrás)
-        // R:  Roll (Inclinación lateral)
+        char statusStr[100]; 
         snprintf(statusStr, sizeof(statusStr), 
                  "Au:%d | G:%.2f | H:%.0f P:%.0f R:%.0f", 
                  liveAudioLevel, total_accel_val, heading_deg, pitch_deg, roll_deg);
         
-        pCharacteristic->setValue(statusStr);
-        pCharacteristic->notify();
+        pTelemetryCharacteristic->setValue(statusStr);
+        pTelemetryCharacteristic->notify();
     }
     // ------------------------------
 
-    // Lógica Alarmas
-    float heading_diff = angular_diff(heading_deg, prev_heading);
-    float roll_diff    = angular_diff(roll_deg, prev_roll);
-    float pitch_diff   = angular_diff(pitch_deg, prev_pitch);
-    
-    if (fabs(total_accel_val) > ACCELERATION_THRESHOLD) {
-        triggerAlarm("IMU_ACCEL", (int)(total_accel_val * 100));
-        return; 
-    } 
-    else if (heading_diff > ORIENTATION_THRESHOLD ||
-             roll_diff    > ORIENTATION_THRESHOLD ||
-             pitch_diff   > ORIENTATION_THRESHOLD) {
-        float max_diff = fmax(heading_diff, fmax(roll_diff, pitch_diff));
-        triggerAlarm("IMU_ROTATION", (int)max_diff);
-        return; 
+    // Lógica Alarmas (SOLO SI NO ESTAMOS EN COOLDOWN)
+    if (millis() - lastAlarmTime > ALARM_COOLDOWN) {
+        float heading_diff = angular_diff(heading_deg, prev_heading);
+        float roll_diff    = angular_diff(roll_deg, prev_roll);
+        float pitch_diff   = angular_diff(pitch_deg, prev_pitch);
+        
+        if (fabs(total_accel_val) > ACCELERATION_THRESHOLD) {
+            triggerAlarm("IMU_ACCEL", (int)(total_accel_val * 100));
+            // Actualizamos referencias para evitar doble disparo inmediato
+            prev_heading = heading_deg; prev_roll = roll_deg; prev_pitch = pitch_deg;
+            return; 
+        } 
+        else if (heading_diff > ORIENTATION_THRESHOLD ||
+                 roll_diff    > ORIENTATION_THRESHOLD ||
+                 pitch_diff   > ORIENTATION_THRESHOLD) {
+            float max_diff = fmax(heading_diff, fmax(roll_diff, pitch_diff));
+            triggerAlarm("IMU_ROTATION", (int)max_diff);
+            prev_heading = heading_deg; prev_roll = roll_deg; prev_pitch = pitch_deg;
+            return; 
+        }
     }
 
     prev_heading = heading_deg; prev_roll = roll_deg; prev_pitch = pitch_deg;
@@ -204,14 +213,25 @@ void setup() {
   pServer->setCallbacks(new MyServerCallbacks());
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
-  pCharacteristic = pService->createCharacteristic(
-                      CHARACTERISTIC_UUID,
+  
+  // 1. TELEMETRÍA (Datos rápidos)
+  pTelemetryCharacteristic = pService->createCharacteristic(
+                      TELEMETRY_CHAR_UUID,
                       BLECharacteristic::PROPERTY_READ   |
                       BLECharacteristic::PROPERTY_NOTIFY
                     );
-  
-  pCharacteristic->addDescriptor(new BLE2902()); // Add "Writting" permission to the Notify action to allow BLE clients to subscribe to Watchdog notifications by writing an '1' to a special register
-  pCharacteristic->setValue("Iniciando...");
+  pTelemetryCharacteristic->addDescriptor(new BLE2902()); 
+  pTelemetryCharacteristic->setValue("Iniciando telemetría...");
+
+  // 2. HEARTBEAT (Estado cada X segundos)
+  pHeartbeatCharacteristic = pService->createCharacteristic(
+                      HEARTBEAT_CHAR_UUID,
+                      BLECharacteristic::PROPERTY_READ   |
+                      BLECharacteristic::PROPERTY_NOTIFY
+                    );
+  pHeartbeatCharacteristic->addDescriptor(new BLE2902());
+  pHeartbeatCharacteristic->setValue("Iniciando heartbeat...");
+
   pService->start();
 
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
@@ -253,41 +273,39 @@ void loop() {
     lastMicTime = micros();
     int raw = analogRead(MIC_PIN);
     
-    // [NUEVO] Guardamos el valor actual en la variable global para el BLE
+    // Guardamos el valor actual en la variable global para el BLE
     liveAudioLevel = raw; 
 
-    int wave = raw - micZero; 
-    if (wave > micThresholdVal) {
-       triggerAlarm("AUDIO", raw);
+    // Solo verificamos umbrales si NO estamos en cooldown
+    if (millis() - lastAlarmTime > ALARM_COOLDOWN) {
+        int wave = raw - micZero; 
+        if (wave > micThresholdVal) {
+           triggerAlarm("AUDIO", raw);
+        }
     }
   }
 
   // B. IMU + BLE UPDATE
   check_imu_events();
+
+  // C. HEARTBEAT (30s)
+  if (millis() - lastHeartbeatTime >= HEARTBEAT_INTERVAL) {
+    lastHeartbeatTime = millis();
+    if (deviceConnected) {
+        pHeartbeatCharacteristic->setValue("OK");
+        pHeartbeatCharacteristic->notify();
+    }
+  }
 }
 
 // -----------------------------------------------------------------------------
-// 8. DISPARADOR ALARMA
+// 8. DISPARADOR ALARMA (NO BLOQUEANTE)
 // -----------------------------------------------------------------------------
 void triggerAlarm(String source, int value) {
-  systemArmed = false;
+  // Marcamos el tiempo actual como inicio del cooldown
+  lastAlarmTime = millis();
 
   String msg = "ALARM:" + source + ":" + String(value);
   Serial.println("\n🚨 " + msg);
   Serial2.println(msg); 
-  
-  Serial.println("⏳ Cooldown 5s...");
-  delay(5000);
-  
-  prev_heading = read_sensor_16bit(BNO055_EUL_HEADING_LSB) / 16.0f;
-  prev_roll    = read_sensor_16bit(BNO055_EUL_HEADING_LSB + 2) / 16.0f;
-  prev_pitch   = read_sensor_16bit(BNO055_EUL_HEADING_LSB + 4) / 16.0f;
-  
-  if (deviceConnected) {
-      pCharacteristic->setValue("SISTEMA REARMADO");
-      pCharacteristic->notify();
-  }
-
-  Serial.println("🛡️ Rearmado.");
-  systemArmed = true;
 }
