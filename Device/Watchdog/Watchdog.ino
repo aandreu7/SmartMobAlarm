@@ -20,11 +20,28 @@
 #define TELEMETRY_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define HEARTBEAT_CHAR_UUID    "beb5483e-36e1-4688-b7f5-ea07361b26a9"
 
+// MODOS DE TELEMETRÍA
+// 0: IDLE (Apagado), 2: STREAM (Continuo, cuando el Usuario pide ver telemetría en tiempo real)
+volatile uint8_t telemetryMode = 0; 
+
 // Un servicio --> dos características: Telemetría + Heartbeat (indica que el dispositivo está vivo periódicamente)
 BLEServer* pServer = NULL;
 BLECharacteristic* pTelemetryCharacteristic = NULL; // Telemetría completa
 BLECharacteristic* pHeartbeatCharacteristic = NULL; // Heartbeat periódico
 bool deviceConnected = false;
+
+
+// This callback is used so the Watchdog can know when extactly the Edge asked for telemetry. It is associated with the Telemtry characteristic.
+class MyTelemetryCallbacks : public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+        String value = pCharacteristic->getValue();
+        if (value.length() > 0) {
+            telemetryMode = (uint8_t)value[0];
+            Serial.print("📡 Cambio de modo Telemetría: ");
+            Serial.println(telemetryMode);
+        }
+    }
+};
 
 class MyServerCallbacks: public BLEServerCallbacks {
     void onConnect(BLEServer* pServer) {
@@ -136,6 +153,19 @@ float angular_diff(float a, float b) {
 
 void triggerAlarm(String source, int value);
 
+// Función auxiliar para enviar datos BLE (Reutilizable)
+void sendBLETelemetry(float g_val, float h, float p, float r) {
+    if (deviceConnected) {
+        char statusStr[100]; 
+        snprintf(statusStr, sizeof(statusStr), 
+                 "Au:%d | G:%.2f | H:%.0f P:%.0f R:%.0f", 
+                 liveAudioLevel, g_val, h, p, r);
+        
+        pTelemetryCharacteristic->setValue(statusStr);
+        pTelemetryCharacteristic->notify();
+    }
+}
+
 void check_imu_events() {
   if (millis() - previousMillisIMU >= intervalIMU) {
     previousMillisIMU = millis();
@@ -160,15 +190,9 @@ void check_imu_events() {
     
     float total_accel_val = sqrt(pow(accel_x/981.0f, 2) + pow(accel_y/981.0f, 2) + pow(accel_z/981.0f, 2));
 
-    // --- TELEMETRÍA BLE COMPLETA ---
-    if (deviceConnected) {
-        char statusStr[100]; 
-        snprintf(statusStr, sizeof(statusStr), 
-                 "Au:%d | G:%.2f | H:%.0f P:%.0f R:%.0f", 
-                 liveAudioLevel, total_accel_val, heading_deg, pitch_deg, roll_deg);
-        
-        pTelemetryCharacteristic->setValue(statusStr);
-        pTelemetryCharacteristic->notify();
+    // --- TELEMETRÍA BLE CONTINUA (STREAM - Modo 2) ---
+    if (telemetryMode == 2) {
+        sendBLETelemetry(total_accel_val, heading_deg, pitch_deg, roll_deg);
     }
     // ------------------------------
 
@@ -180,7 +204,10 @@ void check_imu_events() {
         
         if (fabs(total_accel_val) > ACCELERATION_THRESHOLD) {
             triggerAlarm("IMU_ACCEL", (int)(total_accel_val * 100));
-            // Actualizamos referencias para evitar doble disparo inmediato
+            // [PROACTIVO] Enviamos telemetría BLE justo en el momento del impacto
+            sendBLETelemetry(total_accel_val, heading_deg, pitch_deg, roll_deg); 
+
+            // Actualizamos referencias
             prev_heading = heading_deg; prev_roll = roll_deg; prev_pitch = pitch_deg;
             return; 
         } 
@@ -189,6 +216,9 @@ void check_imu_events() {
                  pitch_diff   > ORIENTATION_THRESHOLD) {
             float max_diff = fmax(heading_diff, fmax(roll_diff, pitch_diff));
             triggerAlarm("IMU_ROTATION", (int)max_diff);
+            // [PROACTIVO] Enviamos telemetría BLE justo en el momento del giro brusco
+            sendBLETelemetry(total_accel_val, heading_deg, pitch_deg, roll_deg);
+
             prev_heading = heading_deg; prev_roll = roll_deg; prev_pitch = pitch_deg;
             return; 
         }
@@ -218,10 +248,12 @@ void setup() {
   pTelemetryCharacteristic = pService->createCharacteristic(
                       TELEMETRY_CHAR_UUID,
                       BLECharacteristic::PROPERTY_READ   |
-                      BLECharacteristic::PROPERTY_NOTIFY
+                      BLECharacteristic::PROPERTY_NOTIFY |
+                      BLECharacteristic::PROPERTY_WRITE  // El Edge podrá escribir en el canal BLE para solicitar telemetría
                     );
+  pTelemetryCharacteristic->setCallbacks(new MyTelemetryCallbacks());
   pTelemetryCharacteristic->addDescriptor(new BLE2902()); 
-  pTelemetryCharacteristic->setValue("Iniciando telemetría...");
+  pTelemetryCharacteristic->setValue("Esperando comandos...");
 
   // 2. HEARTBEAT (Estado cada X segundos)
   pHeartbeatCharacteristic = pService->createCharacteristic(

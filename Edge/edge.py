@@ -38,6 +38,22 @@ async def connect_error(data):
 async def disconnect():
     print("⚠️ [CALLBACK] Socket.IO: Desconectado")
 
+# Evento: Recibe comandos de la UI (0=Stop, 2=Start Stream) y los encola para el Watchdog
+@sio.on("control_command")
+async def control_command(data):
+    global current_telemetry_mode
+    try:
+        command = int(data)
+        print(f"🎮 Comando UI recibido: {command} -> Encolando...")
+        
+        # Actualizamos el estado local para saber si estamos en streaming
+        current_telemetry_mode = command
+        
+        # Ponemos el comando en la cola para que ble_telemetry_loop lo procese
+        await ble_command_queue.put(command)
+    except Exception as e:
+        print(f"❌ Error procesando comando UI: {e}")
+
 # --- CONFIGURACIÓN CLOUDINARY ---
 cloudinary.config(
     cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME"),
@@ -82,7 +98,10 @@ AUDIO_MAX_COUNT = 2 # Positivo si se detectan tantas alarmas de audio en menor t
 
 # --- ESTADO GLOBAL ---
 audio_timestamps = [] 
-latest_ble_data = "Waiting for BLE..."
+latest_ble_data = None
+# Cola asíncrona para comunicar peticiones (Serial/Socket) hacia la tarea BLE
+ble_command_queue = asyncio.Queue()
+current_telemetry_mode = 0
 
 # --- INICIALIZACIÓN IA ---
 print("🧠 Inicializando InsightFace...")
@@ -175,6 +194,7 @@ def upload_to_cloud_ecosystem(verdict, reasons, img_path=None, img_bytes=None, e
 
     # 2. SUBIR METADATOS A COSMOS DB
     if container:
+        global latest_ble_data
         print("☁️ Guardando en Cosmos DB...", end=" ")
         try:
             document = {
@@ -188,6 +208,9 @@ def upload_to_cloud_ecosystem(verdict, reasons, img_path=None, img_bytes=None, e
                 "image_url": image_url, # URL de la imagen subida a Cloudinary
                 "telemetry_snapshot": latest_ble_data # Guardamos el último dato BLE conocido
             }
+            # [CONSUMO] Una vez asignado al documento, invalidamos el dato para futuros eventos
+            latest_ble_data = None
+
             container.create_item(body=document)
             print("✅ Cosmos DB OK")
 
@@ -287,13 +310,23 @@ async def ble_telemetry_loop():
                     await client.start_notify(TELEMETRY_UUID, notification_handler)
                     await client.start_notify(HEARTBEAT_UUID, heartbeat_handler)
                     
-                    # Mantener conexión viva
+                    # Mantener conexión viva y procesar comandos de escritura
                     while client.is_connected:
-                        # Pausa para ceder momentáneamente el control al bucle Bluetooth (BT).
-                        # Al estar en un bucle con condición "True" (se ejecuta indefinidamente), asyncio, al trabajar en un único hilo,
-                        # se quedaría detenido en este bucle para siempre, por lo que no se daría tiempo de CPU a los demás trabajos asignados
-                        # a asyncio. Esta pausa permite darle tiempo de CPU a los demás trabajos. 
-                        await asyncio.sleep(1) # Revisa la conexión tras X segundos
+                        try:
+                            # Esperamos 1s por un comando en la cola. Si no hay, salta TimeoutError.
+                            # Esto actúa también como el "sleep(1)" que teníamos antes.
+                            cmd = await asyncio.wait_for(ble_command_queue.get(), timeout=1.0)
+                            
+                            print(f"📤 Enviando comando BLE: {cmd}")
+                            # Escribimos el comando en la característica de Telemetría
+                            # Convertimos el entero a un byte (little endian)
+                            await client.write_gatt_char(TELEMETRY_UUID, bytes([cmd]), response=True)
+                            
+                        except asyncio.TimeoutError:
+                            # No hubo comandos en 1s, simplemente seguimos conectados
+                            pass
+                        except Exception as e:
+                            print(f"❌ Error escribiendo BLE: {e}")
                         
                 print("⚠️ Desconectado de Watchdog BLE. Reintentando...")
             else:
@@ -384,7 +417,16 @@ async def serial_read_loop():
                         print("\n📸 Recibiendo Referencia Inicial...")
                     else:
                         print(f"\n🚨 EVENTO RECIBIDO: {raw_type}")
-                        print(f"   (Telemetría BLE actual: {latest_ble_data})") # Mostrar dato BLE asociado
+                        
+                        # [IMPORTANTE] Lógica de Sincronización Proactiva
+                        # 1. Invalidamos cualquier dato residual previo.
+                        latest_ble_data = None 
+                        
+                        # 2. El Watchdog envía telemetría BLE automáticamente al detectar el evento.
+                        # Esperamos un breve instante para asegurar la recepción del paquete de radio.
+                        print("📡 Esperando telemetría proactiva del Watchdog...")
+                        await asyncio.sleep(0.5) 
+
                     continue
 
                 # 3. FOTO

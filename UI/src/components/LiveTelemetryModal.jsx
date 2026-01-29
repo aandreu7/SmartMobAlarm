@@ -34,11 +34,14 @@ export default function LiveTelemetryModal({ onClose }) {
   const [telemetry, setTelemetry] = useState(null);
 
   useEffect(() => {
-    // [MODIFICADO] Usar WebSockets en lugar de Polling HTTP
+    // Usa WebSockets para recibir datos en tiempo real
     const socket = io('http://localhost:3001');
 
     socket.on('connect', () => {
       setRawData("Connected. Waiting for device data...");
+      // [AUTO-START] Pedir al Watchdog que inicie el modo Stream (2)
+      console.log("🟢 Abriendo modal: Enviando START STREAM (2)");
+      socket.emit('control_command', 2);
     });
 
     socket.on('telemetry_update', (data) => {
@@ -52,6 +55,9 @@ export default function LiveTelemetryModal({ onClose }) {
     });
 
     return () => {
+      // [AUTO-STOP] Pedir al Watchdog que detenga el modo Stream (0)
+      console.log("🔴 Cerrando modal: Enviando STOP STREAM (0)");
+      socket.emit('control_command', 0);
       socket.disconnect();
     };
   }, []);
