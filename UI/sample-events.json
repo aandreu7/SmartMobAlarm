@@ -17,7 +17,8 @@
     "timestamp": "2026-01-06T10:15:00Z",
     "verdict": "POSITIVE",
     "reasons": ["IMU Movement Detected", "Face NOT Recognized"],
-    "image_url": "https://images.unsplash.com/photo-1509822929063-6b6cfc9b42f2?auto=format&fit=crop&w=800&q=80"
+    "image_url": "https://images.unsplash.com/photo-1509822929063-6b6cfc9b42f2?auto=format&fit=crop&w=800&q=80",
+    "telemetry_snapshot": "Au:500 | G:2.5 | H:45 P:10 R:-5"
   },
   {
     "id": "3",
@@ -27,7 +28,8 @@
     "timestamp": "2026-01-06T10:20:00Z",
     "verdict": "NEGATIVE",
     "reasons": ["Known Person (Alice)"],
-    "image_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=800&q=80"
+    "image_url": "https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=800&q=80",
+    "telemetry_snapshot": "Au:3500 | G:0.98 | H:100 P:0 R:0"
   },
   {
     "id": "4",

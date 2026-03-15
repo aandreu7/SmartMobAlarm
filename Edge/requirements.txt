@@ -1,0 +1,21 @@
+# Core Hardware & Async
+pyserial
+bleak
+asyncio
+
+# Computer Vision & AI
+opencv-python
+numpy
+insightface
+onnxruntime
+Pillow
+
+# Cloud & API
+requests
+cloudinary
+azure-cosmos
+python-dotenv
+
+# Real-time WebSockets
+aiohttp==3.8.6
+python-socketio[asyncio_client]

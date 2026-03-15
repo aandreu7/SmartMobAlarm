@@ -2,10 +2,55 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { CosmosClient } = require('@azure/cosmos');
+const http = require('http');
+const { Server } = require('socket.io');
 
 const app = express();
 app.use(cors()); // Permite peticiones desde el Front-end (localhost:5173)
 app.use(express.json());
+
+// Configuración Servidor HTTP + Socket.io
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: "*", // Permitir conexión desde Vite
+        methods: ["GET", "POST"]
+    }
+});
+
+// Gestión de WebSockets
+io.on('connection', (socket) => {
+    console.log('🟢 Cliente conectado:', socket.id);
+
+    // Recibir datos de telemetría del Edge (Python) y rebotarlos al Frontend (React)
+    socket.on('telemetry_data', (data) => {
+        io.emit('telemetry_update', data); // Broadcast a todos
+    });
+
+    // Heartbeat del Watchdog
+    socket.on('heartbeat', (data) => {
+        // data = { device_id, status, timestamp }
+        io.emit('device_heartbeat', data); 
+    });
+
+    // Alerta de Incidente (Nuevo evento detectado)
+    socket.on('new_incident', (incidentData) => {
+        console.log("⚡ Nuevo incidente recibido del Edge. Retransmitiendo...");
+        io.emit('incident_alert', incidentData);
+    });
+
+    // Comandos de Control (Frontend -> Edge)
+    // 0: Stop Stream, 2: Start Stream
+    socket.on('control_command', (command) => {
+        console.log(`🎮 Comando de control recibido: ${command}. Retransmitiendo al Edge...`);
+        io.emit('control_command', command);
+    });
+
+    socket.on('disconnect', (reason) => {
+        console.log('🔴 Cliente desconectado:', socket.id, '| Razón:', reason);
+    });
+});
+
 
 // Cargar variables de entorno
 const ENDPOINT = process.env.VITE_COSMOS_ENDPOINT;
@@ -23,7 +68,8 @@ if (ENDPOINT && KEY) {
     } catch (e) {
         console.error("❌ Error conectando a Cosmos DB:", e.message);
     }
-} else {
+}
+else {
     console.error("⚠️ Faltan credenciales VITE_COSMOS_* en el archivo .env");
 }
 
@@ -47,7 +93,8 @@ app.get('/api/events', async (req, res) => {
 });
 
 const PORT = 3001;
-app.listen(PORT, () => {
-    console.log(`\n🚀 Servidor API corriendo en http://localhost:${PORT}`);
-    console.log(`   (El Frontend debe solicitar datos a esta URL)\n`);
+// IMPORTANTE: Escuchar con 'server' (HTTP+Socket), no con 'app')
+server.listen(PORT, () => {
+    console.log(`\n🚀 Servidor API + Sockets corriendo en http://localhost:${PORT}`);
+    console.log(`   (Socket.io listo para retransmisión en tiempo real)\n`);
 });
